@@ -32,5 +32,6 @@ async def scrape_movie():
             }), 404
 
 if __name__ == "__main__":
-    print("Starting Web UI on http://localhost:8000")
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Starting Web UI on http://0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, debug=True)

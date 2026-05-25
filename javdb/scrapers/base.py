@@ -1,4 +1,9 @@
-"""Base scraper with shared HTTP client, retry logic, and parsing utilities."""
+"""Base scraper with shared HTTP client, retry logic, and parsing utilities.
+
+Supports a dynamic fallback between curl_cffi and httpx. If curl_cffi is not
+available (e.g. on Android/Termux where compiling C dependencies fails),
+it falls back smoothly to pure-Python httpx.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +12,11 @@ import logging
 import re
 from typing import Optional
 from urllib.parse import urljoin, quote
+import random
 
-import httpx
-from curl_cffi import requests as curl_requests
-from curl_cffi.requests.errors import RequestsError
 from selectolax.parser import HTMLParser
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from ..models import JAVMovie, Performer, SearchResult
-import random
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,20 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
 ]
+
+# Detect and import the best available HTTP client
+HAS_CURL_CFFI = False
+try:
+    from curl_cffi import requests as curl_requests
+    from curl_cffi.requests.errors import RequestsError
+    HTTP_EXCEPTIONS = (RequestsError,)
+    HAS_CURL_CFFI = True
+    logger.info("curl_cffi is available. Using TLS-spoofing engine.")
+except ImportError:
+    import httpx
+    HTTP_EXCEPTIONS = (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)
+    logger.warning("curl_cffi is NOT available. Falling back to pure-Python httpx engine.")
+
 
 class BaseScraper:
     """Base class for all JAV site scrapers."""
@@ -42,7 +58,7 @@ class BaseScraper:
         self.max_retries = max_retries
         self.proxy = proxy
         self.cookies = cookies or {}
-        self._client: Optional[curl_requests.AsyncSession] = None
+        self._client = None
 
     # ── HTTP client ──────────────────────────────────────────────
 
@@ -62,21 +78,32 @@ class BaseScraper:
             "Cache-Control": "max-age=0",
         }
 
-    async def _get_client(self) -> curl_requests.AsyncSession:
-        if self._client is None or getattr(self._client, "closed", True):
-            proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-            self._client = curl_requests.AsyncSession(
-                timeout=self.timeout,
-                impersonate="chrome",
-                proxies=proxies,
-                cookies=self.cookies,
-            )
+    async def _get_client(self):
+        if self._client is None or getattr(self._client, "closed", True) or getattr(self._client, "is_closed", False):
+            if HAS_CURL_CFFI:
+                proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+                self._client = curl_requests.AsyncSession(
+                    timeout=self.timeout,
+                    impersonate="chrome",
+                    proxies=proxies,
+                    cookies=self.cookies,
+                )
+            else:
+                import httpx
+                # httpx uses direct proxy format
+                self._client = httpx.AsyncClient(
+                    http2=True,
+                    timeout=httpx.Timeout(self.timeout),
+                    follow_redirects=True,
+                    proxy=self.proxy,
+                    cookies=self.cookies,
+                )
         return self._client
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(RequestsError),
+        retry=retry_if_exception_type(HTTP_EXCEPTIONS),
     )
     async def fetch(self, url: str, headers: Optional[dict] = None) -> str:
         """Fetch a URL and return the response text."""
@@ -84,20 +111,35 @@ class BaseScraper:
         hdrs = self._build_headers()
         if headers:
             hdrs.update(headers)
-        resp = await client.get(url, headers=hdrs)
-        resp.raise_for_status()
-        return resp.text
+            
+        if HAS_CURL_CFFI:
+            resp = await client.get(url, headers=hdrs)
+            resp.raise_for_status()
+            return resp.text
+        else:
+            resp = await client.get(url, headers=hdrs)
+            resp.raise_for_status()
+            return resp.text
 
     async def fetch_bytes(self, url: str) -> bytes:
         """Fetch raw bytes (for images, etc.)."""
         client = await self._get_client()
-        resp = await client.get(url, headers=self._build_headers())
-        resp.raise_for_status()
-        return resp.content
+        hdrs = self._build_headers()
+        if HAS_CURL_CFFI:
+            resp = await client.get(url, headers=hdrs)
+            resp.raise_for_status()
+            return resp.content
+        else:
+            resp = await client.get(url, headers=hdrs)
+            resp.raise_for_status()
+            return resp.content
 
     async def close(self):
         if self._client:
-            await self._client.close()
+            if HAS_CURL_CFFI:
+                await self._client.close()
+            else:
+                await self._client.aclose()
 
     # ── Parsing helpers ──────────────────────────────────────────
 

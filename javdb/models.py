@@ -5,7 +5,85 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from pydantic import BaseModel, Field
+try:
+    from pydantic import BaseModel, Field
+except ImportError:
+    import json
+    import copy
+
+    class FieldInfo:
+        def __init__(self, default=None, default_factory=None):
+            self.default = default
+            self.default_factory = default_factory
+
+    def Field(default=None, default_factory=None, **kwargs):
+        return FieldInfo(default=default, default_factory=default_factory)
+
+    class BaseModel:
+        def __init__(self, **kwargs):
+            cls = self.__class__
+            annotations = getattr(cls, '__annotations__', {})
+            
+            defaults = {}
+            for name in annotations:
+                if hasattr(cls, name):
+                    defaults[name] = getattr(cls, name)
+                else:
+                    defaults[name] = None
+            
+            for name in annotations:
+                if name in kwargs:
+                    setattr(self, name, kwargs[name])
+                else:
+                    default_val = defaults.get(name)
+                    if isinstance(default_val, FieldInfo):
+                        if default_val.default_factory is not None:
+                            setattr(self, name, default_val.default_factory())
+                        else:
+                            setattr(self, name, default_val.default)
+                    elif default_val is not None:
+                        if isinstance(default_val, list):
+                            setattr(self, name, list(default_val))
+                        elif isinstance(default_val, dict):
+                            setattr(self, name, dict(default_val))
+                        else:
+                            setattr(self, name, default_val)
+                    else:
+                        setattr(self, name, None)
+
+            # Set any extra arguments that aren't in annotations
+            for k, v in kwargs.items():
+                if k not in annotations:
+                    setattr(self, k, v)
+
+        def model_copy(self, deep=False):
+            if deep:
+                return copy.deepcopy(self)
+            else:
+                return copy.copy(self)
+
+        def model_dump(self):
+            def dump_val(v):
+                if isinstance(v, BaseModel):
+                    return v.model_dump()
+                elif isinstance(v, list):
+                    return [dump_val(x) for x in v]
+                elif isinstance(v, dict):
+                    return {k: dump_val(val) for k, val in v.items()}
+                else:
+                    return v
+            
+            annotations = getattr(self.__class__, '__annotations__', {})
+            res = {}
+            for name in annotations:
+                if name.startswith('_'):
+                    continue
+                if hasattr(self, name):
+                    res[name] = dump_val(getattr(self, name))
+            return res
+
+        def model_dump_json(self, indent=None):
+            return json.dumps(self.model_dump(), indent=indent, default=str)
 
 
 class Performer(BaseModel):
