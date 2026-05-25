@@ -1,9 +1,7 @@
-httpx[http2]>=0.27.0
-selectolax>=0.3.21
-pydantic>=2.0
-rich>=13.0
-tenacity>=8.0
-fake-useragent>=1.5.0
-gunicorn>=21.2.0
-flask
-curl_cffi
+httpx[http2]==0.28.1
+selectolax==0.4.9
+rich==14.3.4
+tenacity==9.1.4
+flask[async]==3.1.3
+gunicorn==26.0.0
+curl_cffi==0.15.0
